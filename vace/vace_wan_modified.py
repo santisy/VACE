@@ -211,10 +211,7 @@ def save_video(video, src_video, src_mask, save_dir):
     if not os.path.exists(save_dir):
         os.makedirs(save_dir)
 
-    if args.save_file is not None:
-        save_file = args.save_file
-    else:
-        save_file = os.path.join(save_dir, 'out_video.mp4')
+    save_file = os.path.join(save_dir, 'out_video.mp4')
     cache_video(
         tensor=video[None],
         save_file=save_file,

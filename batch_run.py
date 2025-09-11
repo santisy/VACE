@@ -31,9 +31,9 @@ args = parser.parse_args()
 
 if args.reorg:
     oss = CephS3Storage(
-        key="vq6w5mtzxcnpwinoyoje",
-        secret="ubsnfry8csmnyslr54y1q83m7n66gfkpbx23zich",
-        endpoint_url="http://hdd1.h.pjlab.org.cn:8060",
+        key=os.environ.get("HOSS_KEY"),
+        secret=os.environ.get("HOSS_SECRET"),
+        endpoint_url=os.environ.get("ENDPOINT_URL"),
         default_bucket="yangdingdong"
     )
     timestamp = time.strftime("%Y%m%d_%H%M%S")
