@@ -28,10 +28,11 @@ parser.add_argument("--max_prompts_per_video", type=int, default=3)
 parser.add_argument("--num_processes", type=int, default=None, help="Number of CPU processes for dry_run_meta (default: CPU count)")
 parser.add_argument("--out_meta", type=str, default="metadata.csv")
 parser.add_argument("--simplified", action="store_true")
+parser.add_argument("--use_color_direct", action="store_true")
 
 args = parser.parse_args()
 
-if not args.dry_run_meta:
+if not args.dry_run_meta and not args.use_color_direct:
     from vace.vace_wan_modified import get_wan_model
     from vace.vace_wan_modified import save_video
 
@@ -44,7 +45,7 @@ if args.reorg:
     )
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     TEMP_DIR = f"./temp_results/mytmp_{timestamp}_{uuid.uuid4().hex[:6]}"
-    df = pd.DataFrame(columns=['video', 'prompt', 'input_image'])
+    df = pd.DataFrame(columns=['video', 'prompt', 'input_image', 'ref_mask'])
 
 base_command = "python vace/vace_wan_inference.py --model_name 'vace-14B' --ckpt_dir models/Wan2.1-VACE-14B --src_video {0} --prompt \"{1}\" --save_dir {2}"
 
@@ -69,12 +70,64 @@ def process_task_dry_run(task_data, args):
         dst_video_path = os.path.join(output_root, f"{out_str}.mp4")
         first_frame_path = f"{out_str}_frame0.png"
         
+        # Derive mask path from video_path and copy to output
+        mask_path = video_path.replace("depth", "mask").replace("color", "mask").replace(".mp4", ".png")
+        dst_mask_path = os.path.join(output_root, f"{out_str}_mask.png")
+        shutil.copy(mask_path, dst_mask_path)
+        
         # In dry run, we just create the metadata without actual files
         result_row = {
             'video': os.path.basename(dst_video_path), 
             'prompt': prompt,
-            'input_image': os.path.basename(first_frame_path)
+            'input_image': os.path.basename(first_frame_path),
+            'ref_mask': os.path.basename(dst_mask_path)
         }
+    
+    return result_row
+
+def process_task_color_direct(task_data, args):
+    """Process a single task by directly copying color videos without V2V model"""
+    object_id, joint_id, video_idx, prompt_idx, video_path, prompt = task_data
+    out_str = f"obj{object_id}_joint{joint_id:02d}_prompt{prompt_idx:03d}_video{video_idx:03d}"
+    
+    if args.reorg:
+        output_dir = TEMP_DIR
+        output_root = args.output_root
+        os.makedirs(output_root, exist_ok=True)
+    else:
+        output_base = os.path.join(args.output_root, f"obj{object_id}")
+        os.makedirs(output_base, exist_ok=True)
+        output_dir = os.path.join(output_base, out_str)
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    if not args.reorg:
+        with open(os.path.join(output_dir, "prompt.txt"), "w") as f:
+            f.write(prompt)
+    
+    result_row = None
+    if args.reorg:
+        dst_video_path = os.path.join(output_root, f"{out_str}.mp4")
+        shutil.copy(video_path, dst_video_path)
+        first_frame_path = save_first_frame(video_path, output_root, output_name=f"{out_str}_frame0.png")
+
+        # Derive mask path from video_path and copy to output
+        mask_path = video_path.replace("color", "mask").replace(".mp4", ".png")
+        dst_mask_path = os.path.join(output_root, f"{out_str}_mask.png")
+        shutil.copy(mask_path, dst_mask_path)
+
+        if os.path.exists(dst_video_path):
+            result_row = {
+                'video': os.path.basename(dst_video_path), 
+                'prompt': prompt,
+                'input_image': os.path.basename(first_frame_path),
+                'ref_mask': os.path.basename(dst_mask_path)
+            }
+    else:
+        shutil.copy(video_path, os.path.join(output_dir, "out_video.mp4"))
+        save_first_frame(video_path, output_dir, output_name="frame0.png")
+        mask_path = video_path.replace("color", "mask").replace(".mp4", ".png")
+        shutil.copy(mask_path, os.path.join(output_dir, "mask.png"))
     
     return result_row
 
@@ -128,11 +181,17 @@ def process_task_full(task_data, args, wan_vace):
         shutil.copy(out_video_path, dst_video_path)
         first_frame_path = save_first_frame(out_video_path, output_root, output_name=f"{out_str}_frame0.png")
 
+        # Derive mask path from video_path and copy to output
+        mask_path = video_path.replace("depth", "mask").replace("color", "mask").replace(".mp4", ".png")
+        dst_mask_path = os.path.join(output_root, f"{out_str}_mask.png")
+        shutil.copy(mask_path, dst_mask_path)
+
         if os.path.exists(dst_video_path):
             result_row = {
                 'video': os.path.basename(dst_video_path), 
                 'prompt': prompt,
-                'input_image': os.path.basename(first_frame_path)
+                'input_image': os.path.basename(first_frame_path),
+                'ref_mask': os.path.basename(dst_mask_path)
             }
 
     gc.collect()
@@ -149,7 +208,13 @@ all_tasks = []
 for object_dir in object_dirs:
     object_id = object_dir
     object_path = os.path.join(input_root, object_dir)
-    video_paths = glob.glob(os.path.join(object_path, "*.mp4"))
+    
+    if args.use_color_direct:
+        video_paths = glob.glob(os.path.join(object_path, "color_*.mp4"))
+    else:
+        #TODO: Fix the bugs
+        video_paths = glob.glob(os.path.join(object_path, "depth_*.mp4"))
+        #video_paths = glob.glob(os.path.join(object_path, "*.mp4"))
     
     # Load prompts
     prompt_dict = {}
@@ -206,6 +271,14 @@ if args.dry_run_meta:
             if result_row:
                 df = pd.concat([df, pd.DataFrame([result_row])], ignore_index=True)
 
+elif args.use_color_direct:
+    # Single-threaded processing for direct color video copying
+    for task_data in batch_tasks:
+        result_row = process_task_color_direct(task_data, args)
+        
+        if args.reorg and result_row:
+            df = pd.concat([df, pd.DataFrame([result_row])], ignore_index=True)
+
 else:
     # Single-threaded processing for GPU-based tasks
     wan_vace = get_wan_model()
@@ -218,10 +291,3 @@ else:
 
 if args.reorg:
     df.to_csv(os.path.join(args.output_root, args.out_meta), index=False)
-
-    #if not args.dry_run_meta:
-    #    shutil.rmtree(TEMP_DIR)
-    #    oss.upload_directory(local_dir=output_root,
-    #                        remote_prefix=f"ti2v/{os.path.basename(output_root)}",
-    #                        recursive=True)
-    #    shutil.rmtree(output_root)
