@@ -54,15 +54,13 @@ def process_task_dry_run(task_data, args):
     out_str = f"obj{object_id}_joint{joint_id:02d}_prompt{prompt_idx:03d}_video{video_idx:03d}"
     
     if args.reorg:
-        output_dir = args.temp_dir
         output_root = args.output_root
-        os.makedirs(output_root, exist_ok=True)
-        
         dst_video_path = os.path.join(output_root, f"{out_str}.mp4")
         first_frame_path_full = os.path.join(output_root, f"{out_str}_frame0.png")
         dst_mask_path = os.path.join(output_root, f"{out_str}_mask.png")
         
-        if os.path.exists(dst_video_path) and os.path.exists(first_frame_path_full) and os.path.exists(dst_mask_path):
+        # Only append if the mp4 exists
+        if os.path.exists(dst_video_path):
             result_row = {
                 'video': os.path.basename(dst_video_path), 
                 'prompt': prompt,
@@ -72,28 +70,20 @@ def process_task_dry_run(task_data, args):
             return result_row
     else:
         output_base = os.path.join(args.output_root, f"obj{object_id}")
-        os.makedirs(output_base, exist_ok=True)
         output_dir = os.path.join(output_base, out_str)
-    
-    os.makedirs(output_dir, exist_ok=True)
-    
-    result_row = None
-    if args.reorg:
-        dst_video_path = os.path.join(output_root, f"{out_str}.mp4")
-        first_frame_path = f"{out_str}_frame0.png"
+        output_video = os.path.join(output_dir, "out_video.mp4")
         
-        mask_path = video_path.replace("depth", "mask").replace("color", "mask").replace(".mp4", ".png")
-        dst_mask_path = os.path.join(output_root, f"{out_str}_mask.png")
-        shutil.copy(mask_path, dst_mask_path)
-        
-        result_row = {
-            'video': os.path.basename(dst_video_path), 
-            'prompt': prompt,
-            'input_image': os.path.basename(first_frame_path),
-            'ref_mask': os.path.basename(dst_mask_path)
-        }
+        # Only append if the mp4 exists
+        if os.path.exists(output_video):
+            result_row = {
+                'video': f"{out_str}/out_video.mp4",
+                'prompt': prompt,
+                'input_image': f"{out_str}/frame0.png",
+                'ref_mask': f"{out_str}/mask.png"
+            }
+            return result_row
     
-    return result_row
+    return None
 
 def process_task_color_direct(task_data, args):
     object_id, joint_id, video_idx, prompt_idx, video_path, prompt = task_data
@@ -276,7 +266,11 @@ for object_dir in object_dirs:
         available_prompts = prompt_dict[joint_id]
         
         num_prompts = min(len(available_prompts), args.max_prompts_per_video)
-        selected_prompts = random.sample(available_prompts, num_prompts)
+        
+        # Deterministic seed based on video properties
+        seed = hash((object_id, joint_id, j)) % (2**32)
+        rng = random.Random(seed)
+        selected_prompts = rng.sample(available_prompts, num_prompts)
         
         for i, prompt in enumerate(selected_prompts):
             all_tasks.append((object_id, joint_id, j, i, video_path, prompt))
