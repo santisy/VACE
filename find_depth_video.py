@@ -71,6 +71,20 @@ def copy_generated_video(src: str, dst_dir: str) -> str:
     return dst_path
 
 
+def copy_mask(source_video_path: str, dst_dir: str, tag: str) -> str | None:
+    mask_path = (
+        source_video_path.replace("depth", "mask")
+        .replace("color", "mask")
+        .replace(".mp4", ".png")
+    )
+    if not os.path.exists(mask_path):
+        return None
+    os.makedirs(dst_dir, exist_ok=True)
+    dst_path = os.path.join(dst_dir, f"{tag}_mask.png")
+    shutil.copy2(mask_path, dst_path)
+    return dst_path
+
+
 def _frame_requests(frame_count: int) -> dict[int, list[str]]:
     if frame_count <= 0:
         frame_count = 1
@@ -132,7 +146,7 @@ def save_key_frames(video_path: str, dst_dir: str, tag: str, variant: str) -> li
 def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
-            "Locate the depth video that produced a generated output, copy all related RGB clips, "
+            "Locate the depth video that produced a generated output, copy all related RGB clips and mask, "
             "and save first/middle/last frames for both RGB and depth videos."
         )
     )
@@ -180,6 +194,8 @@ def main() -> None:
         print(f"Failed to copy '{depth_path}' to '{args.output_dir}': {exc}", file=sys.stderr)
         sys.exit(1)
 
+    copied_mask = copy_mask(depth_path, args.output_dir, shared_tag)
+
     generated_video_path = args.generated
     if not os.path.isabs(generated_video_path):
         generated_video_path = os.path.abspath(generated_video_path)
@@ -225,6 +241,10 @@ def main() -> None:
         sys.exit(1)
 
     print(f"Copied depth '{depth_path}' -> '{copied_depth_path}'")
+    if copied_mask:
+        print(f"Copied mask '{copied_mask}'")
+    else:
+        print("Mask file not found; skipped copying.")
     print("Copied RGB videos:")
     for video_path in copied_generated_videos:
         print(f"  {video_path}")
