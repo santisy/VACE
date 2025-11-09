@@ -4,6 +4,7 @@ import argparse
 import glob
 import math
 import os
+import random
 import re
 import shutil
 import sys
@@ -85,6 +86,63 @@ def copy_mask(source_video_path: str, dst_dir: str, tag: str) -> str | None:
     return dst_path
 
 
+def load_prompt_dict(input_root: str, object_id: str) -> dict[int, list[tuple[str, str]]]:
+    object_path = os.path.join(input_root, object_id)
+    prompts_file = os.path.join(object_path, "prompts.txt")
+    if not os.path.exists(prompts_file):
+        raise FileNotFoundError(f"Prompts file '{prompts_file}' not found")
+
+    prompt_dict: dict[int, list[tuple[str, str]]] = {}
+    with open(prompts_file, "r", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split("\t")
+            non_empty = [x for x in parts if x != ""]
+            if not non_empty:
+                continue
+            try:
+                joint_id = int(non_empty[0])
+            except ValueError:
+                continue
+            if len(parts) <= 2:
+                continue
+            original = parts[2].strip()
+            simplified = parts[3].strip() if len(parts) > 3 else ""
+            if not simplified:
+                simplified = original
+            prompt_list = prompt_dict.get(joint_id, [])
+            prompt_list.append((original, simplified))
+            prompt_dict[joint_id] = prompt_list
+    return prompt_dict
+
+
+def select_prompts_for_video(
+    object_id: str,
+    joint_id: int,
+    video_idx: int,
+    prompt_dict: dict[int, list[tuple[str, str]]],
+    max_prompt_index: int,
+    max_prompts_override: int,
+) -> list[tuple[str, str]]:
+    available_prompts = prompt_dict.get(joint_id, [])
+    if not available_prompts:
+        raise ValueError(f"No prompts available for joint {joint_id}")
+
+    target_count = max(max_prompt_index + 1, max_prompts_override)
+    if target_count <= 0:
+        target_count = max_prompt_index + 1
+    if target_count <= 0:
+        target_count = 1
+
+    sample_count = min(len(available_prompts), target_count)
+    if sample_count <= 0:
+        raise ValueError("Unable to determine prompt sample size")
+
+    seed = hash((object_id, joint_id, video_idx)) % (2**32)
+    rng = random.Random(seed)
+    indices = rng.sample(range(len(available_prompts)), sample_count)
+    return [available_prompts[i] for i in indices]
+
+
 def _frame_requests(frame_count: int) -> dict[int, list[str]]:
     if frame_count <= 0:
         frame_count = 1
@@ -150,7 +208,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description=(
             "Locate the depth video that produced a generated output, copy all related RGB clips and mask, "
-            "and save first/middle/last frames for both RGB and depth videos."
+            "save first/middle/last frames for both RGB and depth videos, and write both original and simplified prompts."
         )
     )
     parser.add_argument("--input_root", required=True, help="Root directory passed to batch_run.py")
@@ -168,6 +226,20 @@ def main() -> None:
         "--use_color_direct",
         action="store_true",
         help="Set if batch_run.py was executed with --use_color_direct",
+    )
+    parser.add_argument(
+        "--max_prompts_per_video",
+        type=int,
+        default=0,
+        help=(
+            "Override for the number of prompts sampled per video. Defaults to the highest "
+            "prompt index encountered + 1."
+        ),
+    )
+    parser.add_argument(
+        "--simplified_run",
+        action="store_true",
+        help="Set if the original batch run used --simplified (so simplified prompts were fed to the model).",
     )
 
     args = parser.parse_args()
@@ -211,17 +283,52 @@ def main() -> None:
         generated_dir,
         f"obj{identifier['object_id']}_joint{identifier['joint_id']:02d}_prompt*_video{identifier['video_idx']:03d}.mp4",
     )
-    related_videos = sorted(glob.glob(pattern))
-    if not related_videos:
-        related_videos = [generated_video_path]
+    related_paths = sorted(glob.glob(pattern))
+    if not related_paths:
+        related_paths = [generated_video_path]
 
-    saved_generated_frames: list[str] = []
-    copied_generated_videos: list[str] = []
-    for rgb_path in related_videos:
+    related_infos: list[tuple[str, dict]] = []
+    max_prompt_idx = -1
+    for rgb_path in related_paths:
         try:
             rgb_identifier = parse_generated_identifier(rgb_path)
         except ValueError:
             continue
+        related_infos.append((rgb_path, rgb_identifier))
+        max_prompt_idx = max(max_prompt_idx, rgb_identifier["prompt_idx"])
+
+    if not related_infos:
+        related_infos.append((generated_video_path, identifier))
+        max_prompt_idx = max(max_prompt_idx, identifier["prompt_idx"])
+
+    prompts_used_text: dict[int, str] = {}
+    prompts_original_text: dict[int, str] = {}
+    prompts_simplified_text: dict[int, str] = {}
+    prompts_error: str | None = None
+    prompt_file_path = os.path.join(args.output_dir, f"{shared_tag}_prompts.txt")
+    if max_prompt_idx < 0:
+        max_prompt_idx = 0
+    try:
+        prompt_dict = load_prompt_dict(args.input_root, identifier["object_id"])
+        selected_prompts = select_prompts_for_video(
+            identifier["object_id"],
+            identifier["joint_id"],
+            identifier["video_idx"],
+            prompt_dict,
+            max_prompt_idx,
+            args.max_prompts_per_video,
+        )
+        for idx, (original_text, simplified_text) in enumerate(selected_prompts):
+            prompts_original_text[idx] = original_text
+            prompts_simplified_text[idx] = simplified_text
+            prompts_used_text[idx] = simplified_text if args.simplified_run else original_text
+    except (FileNotFoundError, ValueError) as exc:
+        prompts_error = str(exc)
+
+    prompt_records: list[tuple[int, str | None, str | None, str]] = []
+    saved_generated_frames: list[str] = []
+    copied_generated_videos: list[str] = []
+    for rgb_path, rgb_identifier in related_infos:
         try:
             copied_rgb = copy_generated_video(rgb_path, args.output_dir)
         except OSError as exc:
@@ -236,6 +343,39 @@ def main() -> None:
             )
         except RuntimeError as exc:
             print(exc, file=sys.stderr)
+
+        prompt_idx = rgb_identifier["prompt_idx"]
+        prompt_original = prompts_original_text.get(prompt_idx)
+        prompt_simplified = prompts_simplified_text.get(prompt_idx)
+        prompt_records.append(
+            (
+                prompt_idx,
+                prompt_original,
+                prompt_simplified,
+                os.path.basename(rgb_path),
+            )
+        )
+
+    prompt_file_written: str | None = None
+    missing_prompt_indices: list[int] = []
+    if prompt_records and prompts_used_text:
+        prompt_records_sorted = sorted(prompt_records, key=lambda item: item[0])
+        with open(prompt_file_path, "w", encoding="utf-8") as f:
+            f.write(
+                "# prompt_index\tfilename\toriginal_prompt\tsimplified_prompt\tused_prompt\n"
+            )
+            for idx, original_text, simplified_text, filename in prompt_records_sorted:
+                used_text = prompts_used_text.get(idx)
+                if used_text is None:
+                    missing_prompt_indices.append(idx)
+                orig = original_text or ""
+                simp = simplified_text or ""
+                used = used_text or ""
+                f.write(f"prompt{idx:03d}\t{filename}\t{orig}\t{simp}\t{used}\n")
+        if not missing_prompt_indices:
+            prompt_file_written = prompt_file_path
+    elif prompt_records and prompts_error:
+        missing_prompt_indices = [idx for idx, _, _, _ in prompt_records]
 
     try:
         depth_frames = save_key_frames(depth_path, args.output_dir, shared_tag, "depth")
@@ -257,6 +397,15 @@ def main() -> None:
     print("Saved depth frames:")
     for frame_path in depth_frames:
         print(f"  {frame_path}")
+    if prompt_file_written:
+        print(f"Saved prompts to '{prompt_file_written}'")
+    elif prompt_records:
+        if prompts_error:
+            print(f"Prompts not saved: {prompts_error}")
+        elif missing_prompt_indices:
+            print(
+                f"Prompts saved with missing entries for indices {missing_prompt_indices} at '{prompt_file_path}'"
+            )
 
 
 if __name__ == "__main__":
