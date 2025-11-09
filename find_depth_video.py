@@ -88,10 +88,13 @@ def copy_mask(source_video_path: str, dst_dir: str, tag: str) -> str | None:
 def _frame_requests(frame_count: int) -> dict[int, list[str]]:
     if frame_count <= 0:
         frame_count = 1
-    mid = max(frame_count // 2, 0)
     last = max(frame_count - 1, 0)
+    first = min(4, last)  # Prefer the 5th frame; fall back if video is shorter
+    mid = max(frame_count // 2, 0)
+    if mid < first:
+        mid = first
     requests: dict[int, list[str]] = {}
-    for label, idx in (("first", 0), ("middle", mid), ("last", last)):
+    for label, idx in (("first", first), ("middle", mid), ("last", last)):
         requests.setdefault(idx, []).append(label)
     return requests
 
